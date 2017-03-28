@@ -127,9 +127,6 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
     /** {@inheritDoc} */
     @SuppressWarnings("ConstantConditions")
     @Override public void initialize(URI name, Configuration cfg) throws IOException {
-        System.out.println("initialize");
-
-
         try {
             if (rmtClient != null)
                 throw new IOException("File system is already initialized: " + rmtClient);
@@ -431,7 +428,6 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
 
     /** {@inheritDoc} */
     @Override public FileStatus[] listStatus(Path f) throws IOException {
-        System.out.println("listStatus");
         A.notNull(f, "f");
 
         enterBusy();
@@ -526,7 +522,6 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
 
     /** {@inheritDoc} */
     @Override public FileStatus getFileStatus(Path f) throws IOException {
-        System.out.println("getFileStatus");
         A.notNull(f, "f");
 
         enterBusy();
