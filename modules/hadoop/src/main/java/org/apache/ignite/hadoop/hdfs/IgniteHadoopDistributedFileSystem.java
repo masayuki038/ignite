@@ -137,10 +137,14 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
             A.notNull(name, "name");
             A.notNull(cfg, "cfg");
 
+            super.initialize(name, cfg);
             setConf(cfg);
             mgmt = cfg.getBoolean(IgniteHadoopFileSystem.IGFS_MANAGEMENT, false);
-
-            uri = name;
+            try {
+                uri = new URI("igfs://igfs@/");
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
             uriAuthority = uri.getAuthority();
             user = IgniteHadoopFileSystem.getFsHadoopUser();
 
