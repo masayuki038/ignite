@@ -107,14 +107,6 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
     /** Custom-provided sequential reads before prefetch. */
     private int seqReadsBeforePrefetch;
 
-    /** {@inheritDoc} */
-    @Override public URI getUri() {
-        if (uri == null)
-            throw new IllegalStateException("URI is null (was IgniteHadoopFileSystem properly initialized?).");
-
-        return uri;
-    }
-
     /**
      * Enter busy state.
      *
@@ -132,12 +124,11 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
         // No-op.
     }
 
-
     /** {@inheritDoc} */
     @SuppressWarnings("ConstantConditions")
     @Override public void initialize(URI name, Configuration cfg) throws IOException {
         System.out.println("initialize");
-        enterBusy();
+
 
         try {
             if (rmtClient != null)
@@ -146,25 +137,15 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
             A.notNull(name, "name");
             A.notNull(cfg, "cfg");
 
-            super.initialize(name, cfg);
-
             setConf(cfg);
-
             mgmt = cfg.getBoolean(IgniteHadoopFileSystem.IGFS_MANAGEMENT, false);
 
-            if (!IGFS_SCHEME.equals(name.getScheme()))
-                throw new IOException("Illegal file system URI [expected=" + IGFS_SCHEME +
-                        "://[name]/[optional_path], actual=" + name + ']');
-
             uri = name;
-
             uriAuthority = uri.getAuthority();
-
             user = IgniteHadoopFileSystem.getFsHadoopUser();
 
             // Override sequential reads before prefetch if needed.
             seqReadsBeforePrefetch = parameter(cfg, PARAM_IGFS_SEQ_READS_BEFORE_PREFETCH, uriAuthority, 0);
-
             if (seqReadsBeforePrefetch > 0)
                 seqReadsBeforePrefetchOverride = true;
 
@@ -178,49 +159,38 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
 
             // Get log directory.
             String logDirCfg = parameter(cfg, PARAM_IGFS_LOG_DIR, uriAuthority, DFLT_IGFS_LOG_DIR);
-
             File logDirFile = U.resolveIgnitePath(logDirCfg);
-
             String logDir = logDirFile != null ? logDirFile.getAbsolutePath() : null;
 
             rmtClient = new HadoopIgfsWrapper(uriAuthority, logDir, cfg, LOG, user);
-
-            // Handshake.
             IgfsHandshakeResponse handshake = rmtClient.handshake(logDir);
-
             igfsGrpBlockSize = handshake.blockSize();
-
             IgfsPaths paths = handshake.secondaryPaths();
 
             // Initialize client logger.
             Boolean logEnabled = parameter(cfg, PARAM_IGFS_LOG_ENABLED, uriAuthority, false);
 
             if (handshake.sampling() != null ? handshake.sampling() : logEnabled) {
-                // Initiate client logger.
                 if (logDir == null)
                     throw new IOException("Failed to resolve log directory: " + logDirCfg);
-
                 Integer batchSize = parameter(cfg, PARAM_IGFS_LOG_BATCH_SIZE, uriAuthority, DFLT_IGFS_LOG_BATCH_SIZE);
-
                 clientLog = IgfsLogger.logger(uriAuthority, handshake.igfsName(), logDir, batchSize);
-            } else
+            } else {
                 clientLog = IgfsLogger.disabledLogger();
+            }
 
             try {
                 modeRslvr = new IgfsModeResolver(paths.defaultMode(), paths.pathModes());
             } catch (IgniteCheckedException ice) {
                 throw new IOException(ice);
             }
-
             boolean initSecondary = paths.defaultMode() == PROXY;
 
             if (!initSecondary && paths.pathModes() != null && !paths.pathModes().isEmpty()) {
                 for (T2<IgfsPath, IgfsMode> pathMode : paths.pathModes()) {
                     IgfsMode mode = pathMode.getValue();
-
                     if (mode == PROXY) {
                         initSecondary = true;
-
                         break;
                     }
                 }
@@ -230,7 +200,6 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
                 try {
                     HadoopFileSystemFactory factory0 =
                             (HadoopFileSystemFactory) paths.getPayload(getClass().getClassLoader());
-
                     factory = HadoopDelegateUtils.fileSystemFactoryDelegate(getClass().getClassLoader(), factory0);
                 } catch (IgniteCheckedException e) {
                     throw new IOException("Failed to get secondary file system factory.", e);
@@ -245,9 +214,7 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
 
                 try {
                     FileSystem secFs = (FileSystem) factory.get(user);
-
                     secondaryUri = secFs.getUri();
-
                     A.ensure(secondaryUri != null, "Secondary file system uri should not be null.");
                 } catch (IOException e) {
                     if (!mgmt)
@@ -266,158 +233,6 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
     }
 
     /** {@inheritDoc} */
-    @Override protected void checkPath(Path path) {
-        URI uri = path.toUri();
-
-        if (uri.isAbsolute()) {
-            if (!F.eq(uri.getScheme(), IGFS_SCHEME))
-                throw new InvalidPathException("Wrong path scheme [expected=" + IGFS_SCHEME + ", actual=" +
-                        uri.getAuthority() + ']');
-
-            if (!F.eq(uri.getAuthority(), uriAuthority))
-                throw new InvalidPathException("Wrong path authority [expected=" + uriAuthority + ", actual=" +
-                        uri.getAuthority() + ']');
-        }
-    }
-
-    /** {@inheritDoc} */
-    @SuppressWarnings("deprecation")
-    @Override public short getDefaultReplication() {
-        return dfltReplication;
-    }
-
-    /** {@inheritDoc} */
-    @Override protected void finalize() throws Throwable {
-        super.finalize();
-
-        close();
-    }
-
-    /** {@inheritDoc} */
-    @Override public void close() throws IOException {
-        if (closeGuard.compareAndSet(false, true))
-            close0();
-    }
-
-    /**
-     * Closes file system.
-     *
-     * @throws IOException If failed.
-     */
-    private void close0() throws IOException {
-        if (LOG.isDebugEnabled())
-            LOG.debug("File system closed [uri=" + uri + ", endpoint=" + uriAuthority + ']');
-
-        if (rmtClient == null)
-            return;
-
-        super.close();
-
-        rmtClient.close(false);
-
-        if (clientLog.isLogEnabled())
-            clientLog.close();
-
-        if (factory != null)
-            factory.stop();
-
-        // Reset initialized resources.
-        uri = null;
-        rmtClient = null;
-    }
-
-    /** {@inheritDoc} */
-    @Override public void setTimes(Path p, long mtime, long atime) throws IOException {
-        enterBusy();
-
-        try {
-            A.notNull(p, "p");
-
-            if (mode(p) == PROXY) {
-                final FileSystem secondaryFs = secondaryFileSystem();
-
-                if (secondaryFs == null) {
-                    assert mgmt;
-
-                    // No-op for management connection.
-                    return;
-                }
-
-                secondaryFs.setTimes(toSecondary(p), mtime, atime);
-            }
-            else {
-                IgfsPath path = convert(p);
-
-                rmtClient.setTimes(path, atime, mtime);
-            }
-        }
-        finally {
-            leaveBusy();
-        }
-    }
-
-    /** {@inheritDoc} */
-    @Override public void setPermission(Path p, FsPermission perm) throws IOException {
-        enterBusy();
-
-        try {
-            A.notNull(p, "p");
-
-            if (mode(p) == PROXY) {
-                final FileSystem secondaryFs = secondaryFileSystem();
-
-                if (secondaryFs == null) {
-                    assert mgmt;
-
-                    // No-op for management connection.
-                    return;
-                }
-
-                secondaryFs.setPermission(toSecondary(p), perm);
-            }
-            else if (rmtClient.update(convert(p), permission(perm)) == null) {
-                throw new IOException("Failed to set file permission (file not found?)" +
-                        " [path=" + p + ", perm=" + perm + ']');
-            }
-        }
-        finally {
-            leaveBusy();
-        }
-    }
-
-    /** {@inheritDoc} */
-    @Override public void setOwner(Path p, String username, String grpName) throws IOException {
-        A.notNull(p, "p");
-        A.notNull(username, "username");
-        A.notNull(grpName, "grpName");
-
-        enterBusy();
-
-        try {
-            if (mode(p) == PROXY) {
-                final FileSystem secondaryFs = secondaryFileSystem();
-
-                if (secondaryFs == null) {
-                    assert mgmt;
-
-                    // No-op for management connection.
-                    return;
-                }
-
-                secondaryFs.setOwner(toSecondary(p), username, grpName);
-            }
-            else if (rmtClient.update(convert(p), F.asMap(IgfsUtils.PROP_USER_NAME, username,
-                    IgfsUtils.PROP_GROUP_NAME, grpName)) == null) {
-                throw new IOException("Failed to set file permission (file not found?)" +
-                        " [path=" + p + ", userName=" + username + ", groupName=" + grpName + ']');
-            }
-        }
-        finally {
-            leaveBusy();
-        }
-    }
-
-    /** {@inheritDoc} */
     @Override public FSDataInputStream open(Path f, int bufSize) throws IOException {
         A.notNull(f, "f");
 
@@ -427,58 +242,29 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
             IgfsPath path = convert(f);
             IgfsMode mode = mode(path);
 
-            if (mode == PROXY) {
-                final FileSystem secondaryFs = secondaryFileSystem();
+            HadoopIgfsStreamDelegate stream = seqReadsBeforePrefetchOverride ?
+                    rmtClient.open(path, seqReadsBeforePrefetch) : rmtClient.open(path);
 
-                if (secondaryFs == null) {
-                    assert mgmt;
+            long logId = -1;
 
-                    throw new IOException("Failed to open file (secondary file system is not initialized): " + f);
-                }
+            if (clientLog.isLogEnabled()) {
+                logId = IgfsLogger.nextId();
 
-                FSDataInputStream is = secondaryFs.open(toSecondary(f), bufSize);
-
-                if (clientLog.isLogEnabled()) {
-                    // At this point we do not know file size, so we perform additional request to remote FS to get it.
-                    FileStatus status = secondaryFs.getFileStatus(toSecondary(f));
-
-                    long size = status != null ? status.getLen() : -1;
-
-                    long logId = IgfsLogger.nextId();
-
-                    clientLog.logOpen(logId, path, PROXY, bufSize, size);
-
-                    return new FSDataInputStream(new HadoopIgfsProxyInputStream(is, clientLog, logId));
-                }
-                else
-                    return is;
+                clientLog.logOpen(logId, path, mode, bufSize, stream.length());
             }
-            else {
-                HadoopIgfsStreamDelegate stream = seqReadsBeforePrefetchOverride ?
-                        rmtClient.open(path, seqReadsBeforePrefetch) : rmtClient.open(path);
 
-                long logId = -1;
+            if (LOG.isDebugEnabled())
+                LOG.debug("Opening input stream [thread=" + Thread.currentThread().getName() + ", path=" + path +
+                        ", bufSize=" + bufSize + ']');
 
-                if (clientLog.isLogEnabled()) {
-                    logId = IgfsLogger.nextId();
+            HadoopIgfsInputStream igfsIn = new HadoopIgfsInputStream(stream, stream.length(),
+                    bufSize, LOG, clientLog, logId);
 
-                    clientLog.logOpen(logId, path, mode, bufSize, stream.length());
-                }
+            if (LOG.isDebugEnabled())
+                LOG.debug("Opened input stream [path=" + path + ", delegate=" + stream + ']');
 
-                if (LOG.isDebugEnabled())
-                    LOG.debug("Opening input stream [thread=" + Thread.currentThread().getName() + ", path=" + path +
-                            ", bufSize=" + bufSize + ']');
-
-                HadoopIgfsInputStream igfsIn = new HadoopIgfsInputStream(stream, stream.length(),
-                        bufSize, LOG, clientLog, logId);
-
-                if (LOG.isDebugEnabled())
-                    LOG.debug("Opened input stream [path=" + path + ", delegate=" + stream + ']');
-
-                return new FSDataInputStream(igfsIn);
-            }
-        }
-        finally {
+            return new FSDataInputStream(igfsIn);
+        } finally {
             leaveBusy();
         }
     }
@@ -582,47 +368,25 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
             IgfsPath dstPath = convert(dst);
             IgfsMode mode = mode(srcPath);
 
-            if (mode == PROXY) {
-                final FileSystem secondaryFs = secondaryFileSystem();
+            if (clientLog.isLogEnabled())
+                clientLog.logRename(srcPath, mode, dstPath);
 
-                if (secondaryFs == null) {
-                    assert mgmt;
-
-                    return false;
-                }
-
-                if (clientLog.isLogEnabled())
-                    clientLog.logRename(srcPath, PROXY, dstPath);
-
-                return secondaryFs.rename(toSecondary(src), toSecondary(dst));
+            try {
+                rmtClient.rename(srcPath, dstPath);
+            } catch (IOException ioe) {
+                // Log the exception before rethrowing since it may be ignored:
+                LOG.warn("Failed to rename [srcPath=" + srcPath + ", dstPath=" + dstPath + ", mode=" + mode + ']', ioe);
+                throw ioe;
             }
-            else {
-                if (clientLog.isLogEnabled())
-                    clientLog.logRename(srcPath, mode, dstPath);
-
-                try {
-                    rmtClient.rename(srcPath, dstPath);
-                }
-                catch (IOException ioe) {
-                    // Log the exception before rethrowing since it may be ignored:
-                    LOG.warn("Failed to rename [srcPath=" + srcPath + ", dstPath=" + dstPath + ", mode=" + mode + ']',
-                            ioe);
-
-                    throw ioe;
-                }
-
-                return true;
-            }
-        }
-        catch (IOException e) {
+            return true;
+        } catch (IOException e) {
             // Intentionally ignore IGFS exceptions here to follow Hadoop contract.
             if (F.eq(IOException.class, e.getClass()) && (e.getCause() == null ||
                     !X.hasCause(e.getCause(), IgfsException.class)))
                 throw e;
             else
                 return false;
-        }
-        finally {
+        } finally {
             leaveBusy();
         }
     }
@@ -644,39 +408,19 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
             IgfsPath path = convert(f);
             IgfsMode mode = mode(path);
 
-            if (mode == PROXY) {
-                final FileSystem secondaryFs = secondaryFileSystem();
-
-                if (secondaryFs == null) {
-                    assert mgmt;
-
-                    return false;
-                }
-
-                if (clientLog.isLogEnabled())
-                    clientLog.logDelete(path, PROXY, recursive);
-
-                return secondaryFs.delete(toSecondary(f), recursive);
-            }
-            else {
-                // Will throw exception if delete failed.
-                boolean res = rmtClient.delete(path, recursive);
-
-                if (clientLog.isLogEnabled())
-                    clientLog.logDelete(path, mode, recursive);
-
-                return res;
-            }
-        }
-        catch (IOException e) {
+            // Will throw exception if delete failed.
+            boolean res = rmtClient.delete(path, recursive);
+            if (clientLog.isLogEnabled())
+                clientLog.logDelete(path, mode, recursive);
+            return res;
+        } catch (IOException e) {
             // Intentionally ignore IGFS exceptions here to follow Hadoop contract.
             if (F.eq(IOException.class, e.getClass()) && (e.getCause() == null ||
                     !X.hasCause(e.getCause(), IgfsException.class)))
                 throw e;
             else
                 return false;
-        }
-        finally {
+        } finally {
             leaveBusy();
         }
     }
@@ -692,60 +436,23 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
             IgfsPath path = convert(f);
             IgfsMode mode = mode(path);
 
-            if (mode == PROXY) {
-                final FileSystem secondaryFs = secondaryFileSystem();
+            Collection<IgfsFile> list = rmtClient.listFiles(path);
+            if (list == null)
+                throw new FileNotFoundException("File " + f + " does not exist.");
 
-                if (secondaryFs == null) {
-                    assert mgmt;
+            List<IgfsFile> files = new ArrayList<>(list);
+            FileStatus[] arr = new FileStatus[files.size()];
+            for (int i = 0; i < arr.length; i++)
+                arr[i] = convert(files.get(i));
 
-                    return EMPTY_FILE_STATUS;
-                }
-
-                FileStatus[] arr = secondaryFs.listStatus(toSecondary(f));
-
-                if (arr == null)
-                    throw new FileNotFoundException("File " + f + " does not exist.");
-
+            if (clientLog.isLogEnabled()) {
+                String[] fileArr = new String[arr.length];
                 for (int i = 0; i < arr.length; i++)
-                    arr[i] = toPrimary(arr[i]);
-
-                if (clientLog.isLogEnabled()) {
-                    String[] fileArr = new String[arr.length];
-
-                    for (int i = 0; i < arr.length; i++)
-                        fileArr[i] = arr[i].getPath().toString();
-
-                    clientLog.logListDirectory(path, PROXY, fileArr);
-                }
-
-                return arr;
+                    fileArr[i] = arr[i].getPath().toString();
+                clientLog.logListDirectory(path, mode, fileArr);
             }
-            else {
-                Collection<IgfsFile> list = rmtClient.listFiles(path);
-
-                if (list == null)
-                    throw new FileNotFoundException("File " + f + " does not exist.");
-
-                List<IgfsFile> files = new ArrayList<>(list);
-
-                FileStatus[] arr = new FileStatus[files.size()];
-
-                for (int i = 0; i < arr.length; i++)
-                    arr[i] = convert(files.get(i));
-
-                if (clientLog.isLogEnabled()) {
-                    String[] fileArr = new String[arr.length];
-
-                    for (int i = 0; i < arr.length; i++)
-                        fileArr[i] = arr[i].getPath().toString();
-
-                    clientLog.logListDirectory(path, mode, fileArr);
-                }
-
-                return arr;
-            }
-        }
-        finally {
+            return arr;
+        } finally {
             leaveBusy();
         }
     }
@@ -753,7 +460,6 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
     /** {@inheritDoc} */
     @Override public Path getHomeDirectory() {
         Path path = new Path("/user/" + user);
-
         return path.makeQualified(getUri(), null);
     }
 
@@ -762,31 +468,22 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
         try {
             if (newPath == null) {
                 Path homeDir = getHomeDirectory();
-
                 FileSystem secondaryFs  = secondaryFileSystem();
-
                 if (secondaryFs != null)
                     secondaryFs.setWorkingDirectory(toSecondary(homeDir));
-
                 workingDir = homeDir;
             }
             else {
                 Path fixedNewPath = fixRelativePart(newPath);
-
                 String res = fixedNewPath.toUri().getPath();
-
                 if (!DFSUtil.isValidName(res))
                     throw new IllegalArgumentException("Invalid DFS directory name " + res);
-
                 FileSystem secondaryFs  = secondaryFileSystem();
-
                 if (secondaryFs != null)
                     secondaryFs.setWorkingDirectory(toSecondary(fixedNewPath));
-
                 workingDir = fixedNewPath;
             }
-        }
-        catch (IOException e) {
+        } catch (IOException e) {
             throw new RuntimeException("Failed to obtain secondary file system instance.", e);
         }
     }
@@ -807,38 +504,18 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
             IgfsPath path = convert(f);
             IgfsMode mode = mode(path);
 
-            if (mode == PROXY) {
-                final FileSystem secondaryFs = secondaryFileSystem();
-
-                if (secondaryFs == null) {
-                    assert mgmt;
-
-                    return false;
-                }
-
-                if (clientLog.isLogEnabled())
-                    clientLog.logMakeDirectory(path, PROXY);
-
-                return secondaryFs.mkdirs(toSecondary(f), perm);
-            }
-            else {
-                boolean mkdirRes = rmtClient.mkdirs(path, permission(perm));
-
-                if (clientLog.isLogEnabled())
-                    clientLog.logMakeDirectory(path, mode);
-
-                return mkdirRes;
-            }
-        }
-        catch (IOException e) {
+            boolean mkdirRes = rmtClient.mkdirs(path, permission(perm));
+            if (clientLog.isLogEnabled())
+                clientLog.logMakeDirectory(path, mode);
+            return mkdirRes;
+        } catch (IOException e) {
             // Intentionally ignore IGFS exceptions here to follow Hadoop contract.
             if (F.eq(IOException.class, e.getClass()) && (e.getCause() == null ||
                     !X.hasCause(e.getCause(), IgfsException.class)))
                 throw e;
             else
                 return false;
-        }
-        finally {
+        } finally {
             leaveBusy();
         }
     }
@@ -851,27 +528,11 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
         enterBusy();
 
         try {
-            if (mode(f) == PROXY) {
-                final FileSystem secondaryFs = secondaryFileSystem();
-
-                if (secondaryFs == null) {
-                    assert mgmt;
-
-                    throw new IOException("Failed to get file status (secondary file system is not initialized): " + f);
-                }
-
-                return toPrimary(secondaryFs.getFileStatus(toSecondary(f)));
-            }
-            else {
-                IgfsFile info = rmtClient.info(convert(f));
-
-                if (info == null)
-                    throw new FileNotFoundException("File not found: " + f);
-
-                return convert(info);
-            }
-        }
-        finally {
+            IgfsFile info = rmtClient.info(convert(f));
+            if (info == null)
+                throw new FileNotFoundException("File not found: " + f);
+            return convert(info);
+        } finally {
             leaveBusy();
         }
     }
@@ -883,26 +544,10 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
         enterBusy();
 
         try {
-            if (mode(f) == PROXY) {
-                final FileSystem secondaryFs = secondaryFileSystem();
-
-                if (secondaryFs == null) {
-                    assert mgmt;
-
-                    throw new IOException("Failed to get content summary (secondary file system is not initialized): " +
-                            f);
-                }
-
-                return secondaryFs.getContentSummary(toSecondary(f));
-            }
-            else {
-                IgfsPathSummary sum = rmtClient.contentSummary(convert(f));
-
-                return new ContentSummary(sum.totalLength(), sum.filesCount(), sum.directoriesCount(),
-                        -1, sum.totalLength(), rmtClient.fsStatus().spaceTotal());
-            }
-        }
-        finally {
+            IgfsPathSummary sum = rmtClient.contentSummary(convert(f));
+            return new ContentSummary(sum.totalLength(), sum.filesCount(), sum.directoriesCount(),
+                    -1, sum.totalLength(), rmtClient.fsStatus().spaceTotal());
+        } finally {
             leaveBusy();
         }
     }
@@ -915,36 +560,17 @@ public class IgniteHadoopDistributedFileSystem extends DistributedFileSystem {
 
         try {
             IgfsPath path = convert(status.getPath());
+            long now = System.currentTimeMillis();
 
-            if (mode(status.getPath()) == PROXY) {
-                final FileSystem secondaryFs = secondaryFileSystem();
+            List<IgfsBlockLocation> affinity = new ArrayList<>(rmtClient.affinity(path, start, len));
+            BlockLocation[] arr = new BlockLocation[affinity.size()];
+            for (int i = 0; i < arr.length; i++)
+                arr[i] = convert(affinity.get(i));
 
-                if (secondaryFs == null) {
-                    assert mgmt;
-
-                    return EMPTY_BLOCK_LOCATIONS;
-                }
-
-                Path secPath = toSecondary(status.getPath());
-
-                return secondaryFs.getFileBlockLocations(secondaryFs.getFileStatus(secPath), start, len);
-            }
-            else {
-                long now = System.currentTimeMillis();
-
-                List<IgfsBlockLocation> affinity = new ArrayList<>(rmtClient.affinity(path, start, len));
-
-                BlockLocation[] arr = new BlockLocation[affinity.size()];
-
-                for (int i = 0; i < arr.length; i++)
-                    arr[i] = convert(affinity.get(i));
-
-                if (LOG.isDebugEnabled())
-                    LOG.debug("Fetched file locations [path=" + path + ", fetchTime=" +
-                            (System.currentTimeMillis() - now) + ", locations=" + Arrays.asList(arr) + ']');
-
-                return arr;
-            }
+            if (LOG.isDebugEnabled())
+                LOG.debug("Fetched file locations [path=" + path + ", fetchTime=" +
+                        (System.currentTimeMillis() - now) + ", locations=" + Arrays.asList(arr) + ']');
+            return arr;
         }
         catch (FileNotFoundException ignored) {
             return EMPTY_BLOCK_LOCATIONS;
